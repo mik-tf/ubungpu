@@ -59,7 +59,7 @@ The project includes a Makefile for easier management. Available make commands:
 
 ```bash
 # First clone the repository
-git clone https://github.com/mik-tf/ubungpu.git
+git clone https://github.com/mik-tf/ubungpu
 cd ubungpu
 
 # Install the tool
