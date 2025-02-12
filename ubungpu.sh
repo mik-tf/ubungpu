@@ -412,6 +412,9 @@ main() {
     clear
     echo -e "${BLUE}===== Unified GPU Setup Script v${VERSION} =====${NC}"
     
+    install_prerequisites_and_dependencies
+    setup_logging
+
     # Detect GPU type
     GPU_TYPE=$(detect_gpu_type)
     case $GPU_TYPE in
@@ -426,8 +429,6 @@ main() {
             ;;
     esac
     
-    install_prerequisites_and_dependencies
-    setup_logging
     setup_gpu
     show_gpu_info
     
