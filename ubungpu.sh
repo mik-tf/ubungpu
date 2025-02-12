@@ -3,6 +3,12 @@
 # Unified GPU Setup Script for Ubuntu (NVIDIA & AMD)
 # License: Apache 2.0
 
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+    echo "This script must be run as root"
+    exit 1
+fi
+
 # Get script name dynamically
 SCRIPT_PATH="$0"
 SCRIPT_NAME=$(basename "$SCRIPT_PATH")
@@ -16,7 +22,7 @@ BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 NC='\033[0m' # No Color
 
-# Logging configuration
+# Configuration
 LOG_DIR="/var/log/${INSTALL_NAME}"
 INSTALL_LOG="${LOG_DIR}/install.log"
 
@@ -50,18 +56,10 @@ error() {
 }
 
 setup_logging() {
-    if [ ! -d "$LOG_DIR" ]; then
-        sudo mkdir -p "$LOG_DIR" || error "Failed to create log directory"
-    fi
-
-    if [ ! -f "$INSTALL_LOG" ]; then
-        sudo touch "$INSTALL_LOG" || error "Failed to create log file"
-    fi
-
-    sudo chown $USER:$USER "$LOG_DIR" || error "Failed to set log directory ownership"
-    sudo chown $USER:$USER "$INSTALL_LOG" || error "Failed to set log file ownership"
-    sudo chmod 755 "$LOG_DIR" || error "Failed to set log directory permissions"
-    sudo chmod 644 "$INSTALL_LOG" || error "Failed to set log file permissions"
+    mkdir -p "$LOG_DIR" || error "Failed to create log directory"
+    touch "$INSTALL_LOG" || error "Failed to create log file"
+    chmod 755 "$LOG_DIR" || error "Failed to set log directory permissions"
+    chmod 644 "$INSTALL_LOG" || error "Failed to set log file permissions"
 }
 
 show_logs() {
@@ -100,17 +98,15 @@ show_recent_logs() {
 delete_logs() {
     echo -e "${YELLOW}Deleting logs...${NC}"
     if [ -d "$LOG_DIR" ]; then
-        if ! sudo rm -rf "$LOG_DIR"; then
+        if ! rm -rf "$LOG_DIR"; then
             error "Failed to delete log directory: $LOG_DIR"
-        else
-            echo -e "${GREEN}Successfully deleted log directory: $LOG_DIR${NC}"
         fi
+        echo -e "${GREEN}Successfully deleted log directory: $LOG_DIR${NC}"
     else
         echo -e "${YELLOW}Log directory does not exist: $LOG_DIR${NC}"
     fi
 }
 
-# GPU Detection Function
 detect_gpu_type() {
     if lspci | grep -i "nvidia" > /dev/null; then
         echo "nvidia"
@@ -121,18 +117,17 @@ detect_gpu_type() {
     fi
 }
 
-# Installation Functions
 install_prerequisites_and_dependencies() {
     if ! grep -q "Ubuntu" /etc/os-release; then
         warn "This script is designed for Ubuntu. Other distributions may not work correctly."
     fi
 
     log "Updating package lists..."
-    if ! sudo apt update; then
+    if ! apt update; then
         error "Failed to update package lists"
     fi
 
-    # Common packages for both GPU types
+    # Common packages that should be installed first
     local COMMON_PACKAGES=(
         "wget"
         "curl"
@@ -142,26 +137,41 @@ install_prerequisites_and_dependencies() {
         "linux-headers-$(uname -r)"
     )
 
-    # GPU-specific packages
+    # Install common packages first
+    for package in "${COMMON_PACKAGES[@]}"; do
+        if ! dpkg -l | grep -q "^ii.*$package"; then
+            log "Installing $package..."
+            if ! apt install -y "$package"; then
+                warn "Failed to install $package"
+            fi
+        else
+            log "$package is already installed"
+        fi
+    done
+
+    # After common packages are installed, check GPU type and install specific packages
     local GPU_TYPE=$(detect_gpu_type)
+    local GPU_PACKAGES=()
+    
     case $GPU_TYPE in
         "nvidia")
-            COMMON_PACKAGES+=(
+            GPU_PACKAGES+=(
                 "ubuntu-drivers-common"
                 "dkms"
             )
             ;;
         "amd")
-            COMMON_PACKAGES+=(
+            GPU_PACKAGES+=(
                 "clinfo"
             )
             ;;
     esac
 
-    for package in "${COMMON_PACKAGES[@]}"; do
+    # Install GPU-specific packages
+    for package in "${GPU_PACKAGES[@]}"; do
         if ! dpkg -l | grep -q "^ii.*$package"; then
             log "Installing $package..."
-            if ! sudo apt install -y "$package"; then
+            if ! apt install -y "$package"; then
                 warn "Failed to install $package"
             fi
         else
@@ -171,15 +181,22 @@ install_prerequisites_and_dependencies() {
 
     if [ "${PERFORM_UPGRADE:-false}" = true ]; then
         log "Performing system upgrade..."
-        if ! sudo apt upgrade -y; then
+        if ! apt upgrade -y; then
             warn "Package upgrade failed, continuing anyway..."
         fi
     fi
 }
 
-# NVIDIA-specific setup
 setup_nvidia_gpu() {
     log "NVIDIA GPU detected. Checking current setup..."
+    
+    # First ensure ubuntu-drivers-common is installed
+    if ! command -v ubuntu-drivers &>/dev/null; then
+        log "Installing ubuntu-drivers-common package..."
+        if ! apt-get install -y ubuntu-drivers-common; then
+            error "Failed to install ubuntu-drivers-common"
+        fi
+    fi
     
     # Check current driver status
     if nvidia-smi &>/dev/null; then
@@ -187,7 +204,7 @@ setup_nvidia_gpu() {
         log "NVIDIA drivers are already installed (Version: $CURRENT_DRIVER)"
     else
         log "Installing NVIDIA drivers..."
-        if ! sudo ubuntu-drivers autoinstall; then
+        if ! ubuntu-drivers autoinstall; then
             error "Failed to install NVIDIA drivers"
         fi
         log "Drivers installed. A system restart will be required."
@@ -196,7 +213,7 @@ setup_nvidia_gpu() {
     # Check CUDA installation
     if ! command -v nvcc &>/dev/null; then
         log "Installing CUDA toolkit..."
-        if ! sudo apt install -y nvidia-cuda-toolkit; then
+        if ! apt install -y nvidia-cuda-toolkit; then
             error "Failed to install CUDA toolkit"
         fi
         CUDA_VERSION=$(nvcc --version | grep "release" | awk '{print $5}' | sed 's/,//')
@@ -207,7 +224,6 @@ setup_nvidia_gpu() {
     fi
 }
 
-# AMD-specific setup
 setup_amd_gpu() {
     log "AMD GPU detected. Checking current setup..."
 
@@ -218,33 +234,104 @@ setup_amd_gpu() {
     else
         log "Installing AMDGPU drivers..."
         
+        # Install required packages
+        local REQUIRED_PACKAGES=(
+            "linux-headers-generic"
+            "wget"
+            "gnupg2"
+        )
+        
+        for package in "${REQUIRED_PACKAGES[@]}"; do
+            if ! dpkg -l | grep -q "^ii.*$package"; then
+                log "Installing $package..."
+                if ! apt install -y "$package"; then
+                    error "Failed to install $package"
+                fi
+            fi
+        done
+
         # Add ROCm repository
-        if ! sudo apt-get install -y linux-headers-generic; then
-            error "Failed to install required headers"
+        log "Adding ROCm repository..."
+        if ! wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key | apt-key add -; then
+            error "Failed to add ROCm GPG key"
         fi
-        
-        wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key | sudo apt-key add -
-        echo 'deb [arch=amd64] https://repo.radeon.com/rocm/apt/5.7 ubuntu main' | sudo tee /etc/apt/sources.list.d/rocm.list
-        
-        sudo apt update
-        sudo apt install -y rocm-hip-libraries rocm-dev
+
+        # Detect Ubuntu version
+        UBUNTU_VERSION=$(lsb_release -rs)
+        # Choose appropriate ROCm version based on Ubuntu version
+        case $UBUNTU_VERSION in
+            20.04|22.04)
+                ROCM_VERSION="5.7"  # Latest stable for Ubuntu 20.04/22.04
+                ;;
+            *)
+                warn "Untested Ubuntu version: $UBUNTU_VERSION. Using latest ROCm version."
+                ROCM_VERSION="5.7"
+                ;;
+        esac
+
+        # Add repository
+        echo "deb [arch=amd64] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} ubuntu main" | \
+            tee /etc/apt/sources.list.d/rocm.list
+
+        # Update package lists
+        if ! apt update; then
+            error "Failed to update package lists after adding ROCm repository"
+        fi
+
+        # Install ROCm packages
+        log "Installing ROCm packages..."
+        local ROCM_PACKAGES=(
+            "rocm-hip-libraries"
+            "rocm-dev"
+            "rocm-utils"
+            "rocm-hip-sdk"
+            "hip-runtime-amd"
+        )
+
+        for package in "${ROCM_PACKAGES[@]}"; do
+            if ! apt install -y "$package"; then
+                warn "Failed to install $package"
+            fi
+        done
     fi
 
     # Check ROCm installation
     if ! command -v rocm-smi &>/dev/null; then
         log "Installing ROCm tools..."
-        if ! sudo apt install -y rocm-smi; then
+        if ! apt install -y rocm-smi; then
             error "Failed to install ROCm tools"
         fi
-        ROCM_VERSION=$(apt show rocm-smi | grep Version | awk '{print $2}')
+        
+        # Add user to video group
+        if [ -n "$SUDO_USER" ]; then
+            usermod -a -G video "$SUDO_USER"
+            log "Added user $SUDO_USER to video group"
+        fi
+
+        # Set up environment variables
+        if [ ! -f /etc/profile.d/rocm.sh ]; then
+            echo 'export PATH=$PATH:/opt/rocm/bin:/opt/rocm/rocprofiler/bin:/opt/rocm/opencl/bin' > /etc/profile.d/rocm.sh
+            echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib:/opt/rocm/lib64' >> /etc/profile.d/rocm.sh
+            chmod 644 /etc/profile.d/rocm.sh
+            log "Added ROCm environment variables"
+        fi
+
+        ROCM_VERSION=$(rocm-smi --version 2>/dev/null || echo "unknown")
         log "ROCm tools installed (Version: $ROCM_VERSION)"
     else
-        ROCM_VERSION=$(apt show rocm-smi | grep Version | awk '{print $2}')
+        ROCM_VERSION=$(rocm-smi --version 2>/dev/null || echo "unknown")
         log "ROCm is already installed (Version: $ROCM_VERSION)"
+    fi
+
+    # Verify installation
+    log "Verifying ROCm installation..."
+    if ! rocm-smi --showdriverversion &>/dev/null; then
+        warn "ROCm installation might not be complete. A system restart may be required."
+    else
+        log "ROCm installation verified successfully"
     fi
 }
 
-# Unified GPU setup function
 setup_gpu() {
     log "Detecting GPU type..."
     GPU_TYPE=$(detect_gpu_type)
@@ -262,7 +349,6 @@ setup_gpu() {
     esac
 }
 
-# GPU Information Display Functions
 show_nvidia_info() {
     echo -e "\n${GREEN}GPU Hardware Details:${NC}"
     lspci | grep -i nvidia
@@ -316,30 +402,21 @@ show_gpu_info() {
     esac
 }
 
-# Installation and Uninstallation Functions
 install() {
     echo -e "${GREEN}Installing ${INSTALL_NAME} v${VERSION}...${NC}"
-    if ! sudo -v; then
-        error "Failed to obtain sudo privileges"
-    fi
-
-    sudo rm -f "/usr/local/bin/${INSTALL_NAME}"
     
-    if ! sudo cp "$SCRIPT_PATH" "/usr/local/bin/${INSTALL_NAME}"; then
+    rm -f "/usr/local/bin/${INSTALL_NAME}"
+    
+    if ! cp "$SCRIPT_PATH" "/usr/local/bin/${INSTALL_NAME}"; then
         error "Failed to copy script to /usr/local/bin"
     fi
 
-    if ! sudo chown root:root "/usr/local/bin/${INSTALL_NAME}"; then
-        error "Failed to set script ownership"
-    fi
-
-    if ! sudo chmod 755 "/usr/local/bin/${INSTALL_NAME}"; then
+    if ! chmod 755 "/usr/local/bin/${INSTALL_NAME}"; then
         error "Failed to set script permissions"
     fi
 
-    sudo mkdir -p "$LOG_DIR"
-    sudo chown $USER:$USER "$LOG_DIR"
-    sudo chmod 755 "$LOG_DIR"
+    mkdir -p "$LOG_DIR"
+    chmod 755 "$LOG_DIR"
 
     echo -e "\n${PURPLE}${INSTALL_NAME} v${VERSION} has been installed successfully.${NC}"
     echo -e "\nTo see available commands, run: ${BLUE}${INSTALL_NAME} help${NC}"
@@ -347,11 +424,8 @@ install() {
 
 uninstall() {
     echo -e "${GREEN}Uninstalling ${INSTALL_NAME}...${NC}"
-    if ! sudo -v; then
-        error "Failed to obtain sudo privileges"
-    fi
-
-    if ! sudo rm -f "/usr/local/bin/${INSTALL_NAME}"; then
+    
+    if ! rm -f "/usr/local/bin/${INSTALL_NAME}"; then
         error "Failed to remove script from /usr/local/bin"
     fi
     
@@ -381,7 +455,7 @@ show_help() {
     echo "- Apache 2.0"
     echo -e
     echo "Repository:"
-    echo "- https://github.com/mik-tf/ubundia"
+    echo "- https://github.com/mik-tf/ubungpu"
     echo -e
     echo "Commands:"
     echo -e "${GREEN}  build${NC}           - Run full GPU setup"
@@ -404,7 +478,7 @@ show_help() {
     echo "Requirements:"
     echo "- Ubuntu system (20.04 or newer recommended)"
     echo "- NVIDIA or AMD GPU"
-    echo "- Sudo privileges"
+    echo "- Must be run as root"
     echo -e
 }
 
@@ -449,7 +523,6 @@ main() {
     esac
 }
 
-# Command handling
 handle_command() {
     case "$1" in
         "status")
